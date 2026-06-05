@@ -4,51 +4,34 @@ orbs:
   aws-cli: circleci/aws-cli@5.4.1
 
 jobs:
-  deploy:
+  rollback:
     docker:
-      - image: cimg/node:22.16
+      - image: cimg/base:current
     steps:
-      - checkout
-      - run:
-          name: Build TanStack app
-          working_directory: web
-          command: |
-            npm ci
-            npm run build
       - aws-cli/setup:
           role_arn: ${AWS_ROLE_ARN}
           region: ${AWS_REGION}
-          role_session_name: circleci-amplify-deploy
+          role_session_name: circleci-amplify-rollback
       - run:
-          name: Set release version from git tag
+          name: Plan rollback
           command: |
-            if [ -z "$CIRCLE_TAG" ]; then
-              echo "CIRCLE_TAG is required. Deploy by pushing a git tag (e.g. git tag v1.0.0 && git push origin v1.0.0)"
-              exit 1
-            fi
-            VERSION="$CIRCLE_TAG"
-            echo "export VERSION=${VERSION}" >> "$BASH_ENV"
-            echo "Deploying version: ${VERSION} (commit ${CIRCLE_SHA1})"
-      - run:
-          name: Plan deployment
-          command: |
+            TARGET="<< pipeline.deploy.target_version >>"
             circleci run release plan amplify-hosting \
-              --environment-name=production \
-              --component-name=web \
-              --target-version="${VERSION}"
+              --environment-name=<< pipeline.deploy.environment_name >> \
+              --component-name=<< pipeline.deploy.component_name >> \
+              --target-version="${TARGET}" \
+              --rollback
       - run:
-          name: Sync to S3 and deploy to Amplify Hosting
+          name: Roll back to selected version
           command: |
-            aws s3 sync web/dist/ \
-              "s3://${BUCKET_NAME}/releases/${VERSION}/"
-
+            TARGET="<< pipeline.deploy.target_version >>"
             aws amplify start-deployment \
               --app-id "${APP_ID}" \
               --branch-name "${BRANCH_NAME}" \
-              --source-url "s3://${BUCKET_NAME}/releases/${VERSION}/" \
+              --source-url "s3://${BUCKET_NAME}/releases/${TARGET}/" \
               --source-url-type BUCKET_PREFIX
 
-            echo "${VERSION}" | aws s3 cp - \
+            echo "${TARGET}" | aws s3 cp - \
               "s3://${BUCKET_NAME}/state/current-release.txt"
       - run:
           name: Update planned release to RUNNING
@@ -65,10 +48,10 @@ jobs:
             fi
             circleci run release update amplify-hosting \
               --status=FAILED \
-              --failure-reason="${FAILURE_REASON:-Deployment failed}"
+              --failure-reason="${FAILURE_REASON:-Rollback failed}"
           when: on_fail
 
-  cancel-deploy:
+  cancel-rollback:
     docker:
       - image: cimg/base:current
     steps:
@@ -77,16 +60,11 @@ jobs:
           command: circleci run release update amplify-hosting --status=CANCELED
 
 workflows:
-  deploy:
+  rollback:
     jobs:
-      - deploy:
+      - rollback:
           context: aws-oidc
-          filters:
-            tags:
-              only: /^v.*/
-            branches:
-              ignore: /.*/
-      - cancel-deploy:
+      - cancel-rollback:
           requires:
-            - deploy:
+            - rollback:
                 - canceled
