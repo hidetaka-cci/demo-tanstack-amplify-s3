@@ -13,8 +13,9 @@ jobs:
           name: Build TanStack app
           working_directory: web
           command: |
-            npm ci
-            npm run build
+            corepack enable
+            pnpm install --frozen-lockfile
+            pnpm run build
       - aws-cli/setup:
           role_arn: ${AWS_ROLE_ARN}
           region: ${AWS_REGION}
