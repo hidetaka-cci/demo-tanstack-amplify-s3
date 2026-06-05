@@ -1,0 +1,57 @@
+version: 2.1
+
+orbs:
+  aws-cli: circleci/aws-cli@5.4.1
+
+parameters:
+  release-version:
+    type: string
+    default: ""
+
+jobs:
+  deploy:
+    docker:
+      - image: cimg/node:22.16
+    steps:
+      - checkout
+      - run:
+          name: Build TanStack app
+          working_directory: web
+          command: |
+            npm ci
+            npm run build
+      - aws-cli/setup:
+          role_arn: ${AWS_ROLE_ARN}
+          region: ${AWS_REGION}
+          role_session_name: circleci-amplify-deploy
+      - run:
+          name: Sync to S3 and deploy to Amplify Hosting
+          command: |
+            if [ -n "<< pipeline.parameters.release-version >>" ]; then
+              VERSION="<< pipeline.parameters.release-version >>"
+            else
+              VERSION="build-${CIRCLE_BUILD_NUM}"
+            fi
+
+            echo "Deploying version: ${VERSION}"
+
+            aws s3 sync web/dist/ \
+              "s3://${BUCKET_NAME}/releases/${VERSION}/"
+
+            aws amplify start-deployment \
+              --app-id "${APP_ID}" \
+              --branch-name "${BRANCH_NAME}" \
+              --source-url "s3://${BUCKET_NAME}/releases/${VERSION}/" \
+              --source-url-type BUCKET_PREFIX
+
+            echo "${VERSION}" | aws s3 cp - \
+              "s3://${BUCKET_NAME}/state/current-release.txt"
+
+workflows:
+  deploy:
+    jobs:
+      - deploy:
+          context: aws-oidc
+          filters:
+            branches:
+              only: main
