@@ -2,12 +2,11 @@ version: 2.1
 
 orbs:
   aws-cli: circleci/aws-cli@5.1.1
-  node: circleci/node@6.3.0
 
 executors:
   deploy-executor:
     docker:
-      - image: cimg/node:20.18
+      - image: cimg/node:22.16
     resource_class: large
 
 jobs:
@@ -19,9 +18,12 @@ jobs:
           role_arn: ${AWS_ROLE_ARN}
           region: ${AWS_REGION}
           role_session_name: "circleci-deploy-${CIRCLE_WORKFLOW_ID}"
-      - node/install-packages:
-          pkg-manager: pnpm
-          app-dir: web
+      - run:
+          name: Install dependencies
+          working_directory: web
+          command: |
+            corepack enable
+            pnpm install --frozen-lockfile
       - run:
           name: Build SPA
           working_directory: web
