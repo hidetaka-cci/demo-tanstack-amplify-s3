@@ -23,15 +23,18 @@ TanStack Router + Vite の SPA を CircleCI から S3 経由で Amplify Hosting 
 flowchart LR
   tag["git tag v*"] --> cci["CircleCI"]
   cci --> build["pnpm build"]
-  build --> s3["S3 releases/tag/"]
-  s3 --> amplify["Amplify Hosting"]
-  cci --> state["S3 state/current-release.txt"]
+  build --> archive["S3 releases/tag.tar.gz"]
+  build --> live["S3 live/"]
+  live --> amplify["Amplify Hosting"]
+  archive --> rollback["rollback: 展開して live/ へ"]
+  rollback --> amplify
 ```
 
 1. CircleCI が `web/dist/` をビルド
-2. 成果物を `s3://{BUCKET_NAME}/releases/{tag}/` に配置
-3. `aws amplify start-deployment` で Amplify が S3 から取得してホスティング
-4. 現在のリリースバージョンを `state/current-release.txt` に記録
+2. 成果物を `s3://{BUCKET_NAME}/releases/{tag}.tar.gz` にアーカイブ保存
+3. `web/dist/` を `s3://{BUCKET_NAME}/live/` に同期（`--delete`）
+4. `aws amplify start-deployment` で Amplify が `live/` から取得してホスティング
+5. ロールバック時はアーカイブを取得・展開して `live/` に同期し、再ビルドなしでデプロイ
 
 Amplify アプリ本体は CDK 外で AWS CLI から作成する。CDK は S3 バケットと Amplify が読み取れるバケットポリシーのみ管理する。
 
@@ -95,7 +98,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-ロールバックは [`.circleci/rollback.yml`](.circleci/rollback.yml) を CircleCI の setup パイプラインとして登録し、過去の `releases/{version}/` を指定して実行する。
+ロールバックは [`.circleci/rollback.yml`](.circleci/rollback.yml) を CircleCI の rollback パイプラインとして登録し、過去の `releases/{tag}.tar.gz` を取得・展開して `live/` へ再デプロイする（ビルドなし）。
 
 ## クリーンアップ
 

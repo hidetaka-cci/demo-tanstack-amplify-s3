@@ -1,80 +1,71 @@
 version: 2.1
 
 orbs:
-  aws-cli: circleci/aws-cli@5.4.1
+  aws-cli: circleci/aws-cli@5.1.1
+  node: circleci/node@6.3.0
+
+executors:
+  deploy-executor:
+    docker:
+      - image: cimg/node:20.18
+    resource_class: large
 
 jobs:
   deploy:
-    docker:
-      - image: cimg/node:22.16
+    executor: deploy-executor
     steps:
       - checkout
-      - run:
-          name: Build TanStack app
-          working_directory: web
-          command: |
-            corepack enable
-            pnpm install --frozen-lockfile
-            pnpm run build
       - aws-cli/setup:
           role_arn: ${AWS_ROLE_ARN}
           region: ${AWS_REGION}
-          role_session_name: circleci-amplify-deploy
+          role_session_name: "circleci-deploy-${CIRCLE_WORKFLOW_ID}"
+      - node/install-packages:
+          pkg-manager: pnpm
+          app-dir: web
       - run:
-          name: Set release version from git tag
-          command: |
-            if [ -z "$CIRCLE_TAG" ]; then
-              echo "CIRCLE_TAG is required. Deploy by pushing a git tag (e.g. git tag v1.0.0 && git push origin v1.0.0)"
-              exit 1
-            fi
-            VERSION="$CIRCLE_TAG"
-            echo "export VERSION=${VERSION}" >> "$BASH_ENV"
-            echo "Deploying version: ${VERSION} (commit ${CIRCLE_SHA1})"
+          name: Build SPA
+          working_directory: web
+          command: pnpm run build
       - run:
           name: Plan deployment
           command: |
             circleci run release plan amplify-hosting \
               --environment-name=production \
               --component-name=web \
-              --target-version="${VERSION}"
+              --target-version=${CIRCLE_TAG}
       - run:
-          name: Sync to S3 and deploy to Amplify Hosting
+          name: Update release to RUNNING
+          command: circleci run release update amplify-hosting --status=RUNNING
+      - run:
+          name: Archive build artifact to S3 (named by git tag)
           command: |
-            aws s3 sync web/dist/ \
-              "s3://${BUCKET_NAME}/releases/${VERSION}/"
+            tar czf "/tmp/${CIRCLE_TAG}.tar.gz" -C web/dist .
+            aws s3 cp "/tmp/${CIRCLE_TAG}.tar.gz" \
+              "s3://${BUCKET_NAME}/releases/${CIRCLE_TAG}.tar.gz"
+      - run:
+          name: Sync to live prefix and deploy to Amplify Hosting
+          command: |
+            aws s3 sync web/dist/ "s3://${BUCKET_NAME}/live/" --delete
 
             aws amplify start-deployment \
               --app-id "${APP_ID}" \
               --branch-name "${BRANCH_NAME}" \
-              --source-url "s3://${BUCKET_NAME}/releases/${VERSION}/" \
+              --source-url "s3://${BUCKET_NAME}/live/" \
               --source-url-type BUCKET_PREFIX
-
-            echo "${VERSION}" | aws s3 cp - \
-              "s3://${BUCKET_NAME}/state/current-release.txt"
       - run:
-          name: Update planned release to RUNNING
-          command: circleci run release update amplify-hosting --status=RUNNING
-      - run:
-          name: Update planned release to SUCCESS
+          name: Mark release as SUCCESS
           command: circleci run release update amplify-hosting --status=SUCCESS
           when: on_success
       - run:
-          name: Update planned release to FAILED
-          command: |
-            if [ -f failure_reason.env ]; then
-              source failure_reason.env
-            fi
-            circleci run release update amplify-hosting \
-              --status=FAILED \
-              --failure-reason="${FAILURE_REASON:-Deployment failed}"
+          name: Mark release as FAILED
+          command: circleci run release update amplify-hosting --status=FAILED
           when: on_fail
 
   cancel-deploy:
-    docker:
-      - image: cimg/base:current
+    executor: deploy-executor
     steps:
       - run:
-          name: Update planned release to CANCELED
+          name: Mark release as CANCELED
           command: circleci run release update amplify-hosting --status=CANCELED
 
 workflows:
@@ -88,6 +79,12 @@ workflows:
             branches:
               ignore: /.*/
       - cancel-deploy:
+          context: aws-oidc
           requires:
             - deploy:
-                - canceled
+              - canceled
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/

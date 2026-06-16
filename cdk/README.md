@@ -23,9 +23,8 @@ CircleCI が以下のプレフィックスに書き込む想定:
 
 ```
 s3://{bucket}/
-├── releases/{version}/   # バージョン別ビルド成果物（git タグ名）
-└── state/
-    └── current-release.txt
+├── releases/{tag}.tar.gz   # バージョン別ビルド成果物アーカイブ（git タグ名）
+└── live/                   # Amplify が読み取る配信プレフィックス
 ```
 
 ## 前提

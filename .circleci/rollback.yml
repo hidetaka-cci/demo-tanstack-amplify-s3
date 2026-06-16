@@ -1,62 +1,65 @@
 version: 2.1
 
 orbs:
-  aws-cli: circleci/aws-cli@5.4.1
+  aws-cli: circleci/aws-cli@5.1.1
+
+executors:
+  rollback-executor:
+    docker:
+      - image: cimg/aws:2023.03
+    resource_class: medium
 
 jobs:
   rollback:
-    docker:
-      - image: cimg/base:current
+    executor: rollback-executor
+    environment:
+      COMPONENT_NAME: << pipeline.deploy.component_name >>
+      ENVIRONMENT_NAME: << pipeline.deploy.environment_name >>
+      TARGET_VERSION: << pipeline.deploy.target_version >>
     steps:
       - aws-cli/setup:
           role_arn: ${AWS_ROLE_ARN}
           region: ${AWS_REGION}
-          role_session_name: circleci-amplify-rollback
+          role_session_name: "circleci-rollback-${CIRCLE_WORKFLOW_ID}"
       - run:
           name: Plan rollback
           command: |
-            TARGET="<< pipeline.deploy.target_version >>"
             circleci run release plan amplify-hosting \
-              --environment-name=<< pipeline.deploy.environment_name >> \
-              --component-name=<< pipeline.deploy.component_name >> \
-              --target-version="${TARGET}" \
+              --environment-name=${ENVIRONMENT_NAME} \
+              --component-name=${COMPONENT_NAME} \
+              --target-version=${TARGET_VERSION} \
               --rollback
       - run:
-          name: Roll back to selected version
+          name: Update rollback to RUNNING
+          command: circleci run release update amplify-hosting --status=RUNNING
+      - run:
+          name: Fetch archived artifact and redeploy (no rebuild)
           command: |
-            TARGET="<< pipeline.deploy.target_version >>"
+            aws s3 cp "s3://${BUCKET_NAME}/releases/${TARGET_VERSION}.tar.gz" /tmp/rollback.tar.gz
+            rm -rf /tmp/rollback && mkdir -p /tmp/rollback
+            tar xzf /tmp/rollback.tar.gz -C /tmp/rollback
+
+            aws s3 sync /tmp/rollback/ "s3://${BUCKET_NAME}/live/" --delete
+
             aws amplify start-deployment \
               --app-id "${APP_ID}" \
               --branch-name "${BRANCH_NAME}" \
-              --source-url "s3://${BUCKET_NAME}/releases/${TARGET}/" \
+              --source-url "s3://${BUCKET_NAME}/live/" \
               --source-url-type BUCKET_PREFIX
-
-            echo "${TARGET}" | aws s3 cp - \
-              "s3://${BUCKET_NAME}/state/current-release.txt"
       - run:
-          name: Update planned release to RUNNING
-          command: circleci run release update amplify-hosting --status=RUNNING
-      - run:
-          name: Update planned release to SUCCESS
+          name: Update rollback to SUCCESS
           command: circleci run release update amplify-hosting --status=SUCCESS
           when: on_success
       - run:
-          name: Update planned release to FAILED
-          command: |
-            if [ -f failure_reason.env ]; then
-              source failure_reason.env
-            fi
-            circleci run release update amplify-hosting \
-              --status=FAILED \
-              --failure-reason="${FAILURE_REASON:-Rollback failed}"
+          name: Update rollback to FAILED
+          command: circleci run release update amplify-hosting --status=FAILED
           when: on_fail
 
   cancel-rollback:
-    docker:
-      - image: cimg/base:current
+    executor: rollback-executor
     steps:
       - run:
-          name: Update planned release to CANCELED
+          name: Update rollback to CANCELED
           command: circleci run release update amplify-hosting --status=CANCELED
 
 workflows:
@@ -65,6 +68,7 @@ workflows:
       - rollback:
           context: aws-oidc
       - cancel-rollback:
+          context: aws-oidc
           requires:
             - rollback:
-                - canceled
+              - canceled
